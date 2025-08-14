@@ -7,8 +7,7 @@
   <style>
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
     .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="text"] { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
-    select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
+    input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
     button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
     button:hover { background:#f7f7f7; }
     .tabs { display:flex; gap:8px; margin:12px 0; }
@@ -16,15 +15,13 @@
     .tab-btn.active { background:#111; color:#fff; border-color:#111; }
     .panel { display:none; }
     .panel.active { display:block; }
-
     table { border-collapse:collapse; width:100%; margin-top:8px; }
     th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
     th { background:#fafafa; }
-
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; } /* red */
+    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; } /* red */
     .muted { color:#666; font-size:12px; }
   </style>
 </head>
@@ -67,11 +64,10 @@
   </div>
 
 <script>
-  // --- Your live endpoints ---
-  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbz3Z8WJgW3dOT8hDYRrD1irSVIYA5fT1GKLKx5mFyf-OS3wt3eqaHg0iXAKzPyUCSE57A/exec";
+  // Your live Apps Script web app (JSON API)
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbw2Xw8ECyln6ow2ucf6GIMyaB1d8aBzORRL5OAMjYJanfRJrL51tUMRAXeeHOrkhpptbg/exec";
 
-  // Store nurse identity locally
+  // Nurse identity
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   document.getElementById('saveNurse').onclick = () => {
@@ -100,84 +96,44 @@
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  // Data state
+  // Data
   let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
 
-  async function loadBeds() {
-    try {
-      // cache-bust so we always read fresh CSV
-      const res = await fetch(`${CSV_URL}${CSV_URL.includes('?') ? '&' : '?'}_=${Date.now()}`, { cache: 'no-store' });
-      const text = await res.text();
-      const rows = text.trim().split("\n").map(r => splitCsvRow(r));
-      if (rows.length < 2) { beds = []; render(); return; }
-
-      const header = rows[0];
-      const idx = {
-        bedID: header.indexOf("Bed ID"),
-        area: header.indexOf("Area"),
-        status: header.indexOf("Status"),
-        nurse: header.indexOf("Nurse"),
-        timeBooked: header.indexOf("Time Booked"),
-        lastUpdated: header.indexOf("Last Updated")
-      };
-
-      beds = rows.slice(1).map(r => ({
-        bedID: r[idx.bedID] || "",
-        area: r[idx.area] || "",
-        status: r[idx.status] || "",
-        nurse: r[idx.nurse] || "",
-        timeBooked: r[idx.timeBooked] || "",
-        lastUpdated: r[idx.lastUpdated] || ""
-      }));
-      render();
-    } catch (e) {
-      console.error("Failed to load CSV:", e);
-    }
+  // Read from Apps Script as JSON (no CSV)
+  async function loadBeds(){
+    const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
+    const json = await res.json();
+    beds = (json && json.ok) ? json.beds : [];
+    render();
   }
 
-  // CSV parser (handles quoted commas)
-  function splitCsvRow(row) {
-    const out = [];
-    let cur = '', inQ = false;
-    for (let i = 0; i < row.length; i++) {
-      const c = row[i];
-      if (c === '"') {
-        if (inQ && row[i+1] === '"') { cur += '"'; i++; }
-        else inQ = !inQ;
-      } else if (c === ',' && !inQ) {
-        out.push(cur); cur = '';
-      } else cur += c;
-    }
-    out.push(cur);
-    return out.map(s => s.trim());
-  }
-
-  function pill(status) {
-    const s = (status || "").toLowerCase();
-    if (s === "available")   return `<span class="pill pill-available">Available</span>`;
-    if (s === "reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s === "unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
+  // Render helpers
+  function pill(status){
+    const s = (status||"").toLowerCase();
+    if (s==="available")   return `<span class="pill pill-available">Available</span>`;
+    if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
+    if (s==="unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
-  function actionsForRow(row) {
-    const s = (row.status || "").toLowerCase();
-    // Available → exactly one action: Reserve 30m
-    if (s === "available") {
+  function actionsForRow(row){
+    const s = (row.status||"").toLowerCase();
+    if (s==="available") {
+      // exactly one action on available
       return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
     }
-    // Reserved/Unavailable → Mark Available (undo)
+    // non-available → undo
     return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Mark Available</button>`;
   }
 
-  function mountTable(targetId, rows) {
+  function mountTable(targetId, rows){
     const el = document.getElementById(targetId);
     if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
     const html = [
       "<table>",
       "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
       "<tbody>",
-      ...rows.map(r => `
+      ...rows.map(r=>`
         <tr>
           <td>${escapeHtml(r.bedID)}</td>
           <td>${escapeHtml(r.area)}</td>
@@ -185,61 +141,58 @@
           <td>${escapeHtml(r.nurse)}</td>
           <td>${escapeHtml(r.timeBooked)}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
-        </tr>`),
+        </tr>
+      `),
       "</tbody></table>"
     ].join("");
     el.innerHTML = html;
   }
 
-  function render() {
-    const areaQ = (areaFilter.value || "").toLowerCase();
-    const statusQ = (statusFilter.value || "");
-    const me = (localStorage.getItem('bmu_nurse') || "").trim().toLowerCase();
+  function render(){
+    const areaQ = (areaFilter.value||"").toLowerCase();
+    const statusQ = statusFilter.value; // "", "Available", "Reserved", "Unavailable"
+    const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
-    // Overall with filters
     const filtered = beds.filter(b =>
-      (areaQ === "" || (b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ === "" || (b.status||"") === statusQ)
+      (areaQ==="" || (b.area||"").toLowerCase().includes(areaQ)) &&
+      (statusQ==="" || (b.status||"") === statusQ)
     );
     mountTable("tblOverall", filtered);
 
-    // My Reserved: show rows by me where status is Reserved or Unavailable
     const mine = beds.filter(b => {
-      const nurse = (b.nurse || "").toLowerCase();
-      const s = (b.status || "").toLowerCase();
-      return me && nurse === me && (s === "reserved" || s === "unavailable");
+      const nurse = (b.nurse||"").toLowerCase();
+      const s = (b.status||"").toLowerCase();
+      return me && nurse===me && (s==="reserved" || s==="unavailable");
     });
     mountTable("tblMyReserved", mine);
   }
 
-  // API calls to Apps Script
-  async function callApi(payload) {
+  // Write via Apps Script
+  async function callApi(payload){
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" }, // avoids CORS preflight with Apps Script
+      headers: { "Content-Type": "text/plain" }, // avoids preflight with Apps Script
       body: JSON.stringify(payload)
     });
     return res.json();
   }
-
   window.reserveBed = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
-    if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
+    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
+    if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
     await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
     await loadBeds();
   };
-
   window.markAvailable = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse') || "").trim(); // optional
+    const nurse = (localStorage.getItem('bmu_nurse')||"").trim(); // optional
     await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
     await loadBeds();
   };
 
-  // Small helpers to avoid HTML/attribute injection if IDs contain slashes etc.
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  // tiny escape helpers
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
-  // First load + periodic refresh
+  // init
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
