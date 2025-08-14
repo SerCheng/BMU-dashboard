@@ -7,8 +7,7 @@
   <style>
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
     .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="text"] { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
-    select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
+    input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
     button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
     button:hover { background:#f7f7f7; }
     .tabs { display:flex; gap:8px; margin:12px 0; }
@@ -67,12 +66,13 @@
   </div>
 
 <script>
-  // Correct CSV endpoint (not pubhtml)
+  // READ from your published CSV
   const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
 
-  // If you still want to write changes via Apps Script, keep this set (otherwise it’s unused)
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyhvY8NM0RRqfXo__He-kxyGi8iX7_Ld2Z2BIC43r1oetjlQCuXlD0FX0ybNnsTyvWA2w/exec";
+  // WRITE via Apps Script (reserve / mark available)
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzwKczEuLiVVsipbIvLGBY1ZGXKO1rl9lb5y5Z9fwXn8me7O4OVxwhHS0g1Y5o7hguMjg/exec";
 
+  // Nurse identity (local to browser)
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   const diag       = document.getElementById('diag');
@@ -87,6 +87,7 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
+  // Tabs
   const tabs = document.querySelectorAll('.tab-btn');
   tabs.forEach(btn => btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
@@ -95,13 +96,15 @@
     document.getElementById(btn.dataset.tab).classList.add('active');
   }));
 
+  // Filters
   const statusFilter = document.getElementById('statusFilter');
   const areaFilter   = document.getElementById('areaFilter');
   document.getElementById('refreshBtn').onclick = () => loadBeds();
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  let beds = [];
+  // Data
+  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
 
   async function loadBeds() {
     try {
@@ -109,8 +112,8 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
 
-      // Some locales use \r\n; be tolerant
-      const rows = text.replace(/\r/g,'').split("\n").filter(Boolean).map(r => splitCsvRow(r));
+      // Normalize line endings and split
+      const rows = text.replace(/\r/g,'').split("\n").filter(Boolean).map(splitCsvRow);
       if (rows.length < 2) {
         beds = [];
         diag.textContent = "loaded 0 rows";
@@ -118,6 +121,7 @@
         return;
       }
 
+      // Map columns by header names (must match exactly)
       const header = rows[0];
       const idx = {
         bedID: header.indexOf("Bed ID"),
@@ -140,12 +144,12 @@
       diag.textContent = `loaded ${beds.length} rows`;
       render();
     } catch (e) {
-      console.error("Failed to load CSV:", e);
+      console.error("CSV load error:", e);
       diag.textContent = `CSV error: ${e.message || e}`;
     }
   }
 
-  // CSV parser (handles quoted commas)
+  // CSV parser that handles quoted fields/commas
   function splitCsvRow(row) {
     const out = [];
     let cur = '', inQ = false;
@@ -226,11 +230,12 @@
     mountTable("tblMyReserved", mine);
   }
 
-  // API calls (only used if you click Reserve / Mark Available)
+  // Write via Apps Script (Reserve / Mark Available)
   async function callApi(payload) {
+    if (!WEB_APP_URL) return { ok:false, error:"No WEB_APP_URL set" };
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/plain" }, // avoids preflight with Apps Script
       body: JSON.stringify(payload)
     });
     return res.json();
@@ -249,9 +254,11 @@
     await loadBeds();
   };
 
+  // Escape helpers
   function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
+  // Go
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
