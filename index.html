@@ -21,7 +21,7 @@
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; } /* red */
+    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
     .muted { color:#666; font-size:12px; }
   </style>
 </head>
@@ -54,6 +54,7 @@
         <input id="areaFilter" type="text" placeholder="Type area to filter…" />
       </label>
       <button id="refreshBtn">Refresh</button>
+      <span id="srcNote" class="muted"></span>
     </div>
     <div id="tblOverall"></div>
   </div>
@@ -64,10 +65,11 @@
   </div>
 
 <script>
-  // Your live Apps Script web app (JSON API) — UPDATED
+  // Primary JSON API + fallback pubhtml
   const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwv8TQaOmfgQ_vbiYrSChg922BXKWn3KghG69oNBL_wIr9y1ZqSUaWyTUZbfLWrXAub9w/exec";
+  const PUBHTML_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pubhtml?gid=0&single=true";
 
-  // Nurse identity
+  // nurse identity
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   document.getElementById('saveNurse').onclick = () => {
@@ -80,7 +82,7 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // Tabs
+  // tabs
   const tabs = document.querySelectorAll('.tab-btn');
   tabs.forEach(btn => btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
@@ -89,40 +91,87 @@
     document.getElementById(btn.dataset.tab).classList.add('active');
   }));
 
-  // Filters
+  // filters
   const statusFilter = document.getElementById('statusFilter');
   const areaFilter   = document.getElementById('areaFilter');
+  const srcNote = document.getElementById('srcNote');
   document.getElementById('refreshBtn').onclick = () => loadBeds();
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  // Data
-  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
+  // data
+  let beds = [];
 
-  // Read from Apps Script as JSON (no CSV)
   async function loadBeds(){
-    const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
-    const json = await res.json();
-    beds = (json && json.ok) ? json.beds : [];
+    // try API first
+    try {
+      const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
+      const json = await res.json();
+      if (json && json.ok && Array.isArray(json.beds) && json.beds.length) {
+        beds = json.beds;
+        srcNote.textContent = "source: Apps Script (live)";
+        return render();
+      }
+    } catch(_) {}
+
+    // fallback: pubhtml parsing
+    try {
+      const res2 = await fetch(`${PUBHTML_URL}&_=${Date.now()}`, { cache: 'no-store' });
+      const html = await res2.text();
+      beds = parsePubHtml(html);
+      srcNote.textContent = "source: Published sheet (HTML)";
+    } catch(e) {
+      srcNote.textContent = "couldn't load data";
+      beds = [];
+    }
     render();
   }
 
-  // Render helpers
+  function parsePubHtml(html){
+    const dom = new DOMParser().parseFromString(html, "text/html");
+    const table = dom.querySelector("table.waffle");
+    if (!table) return [];
+    const rows = Array.from(table.querySelectorAll("tr"));
+    if (rows.length < 2) return [];
+    const headers = Array.from(rows[0].querySelectorAll("th,td")).map(c => c.textContent.trim());
+    const idx = {
+      bedID: headers.findIndex(h => /bed id/i.test(h)),
+      area: headers.findIndex(h => /^area$/i.test(h)),
+      status: headers.findIndex(h => /^status$/i.test(h)),
+      nurse: headers.findIndex(h => /^nurse$/i.test(h)),
+      timeBooked: headers.findIndex(h => /time\s*booked/i.test(h)),
+      lastUpdated: headers.findIndex(h => /last\s*updated/i.test(h)),
+    };
+    const out = [];
+    for (let r=1;r<rows.length;r++){
+      const cells = Array.from(rows[r].querySelectorAll("td")).map(c => c.textContent.trim());
+      if (!cells.length) continue;
+      const bedID = at(cells, idx.bedID);
+      if (!bedID) continue;
+      out.push({
+        bedID,
+        area: at(cells, idx.area),
+        status: normalizeStatusDisplay(at(cells, idx.status)),
+        nurse: at(cells, idx.nurse),
+        timeBooked: at(cells, idx.timeBooked),
+        lastUpdated: at(cells, idx.lastUpdated),
+      });
+    }
+    return out;
+  }
+  function at(arr,i){ return (i>=0 && i<arr.length) ? arr[i] : ""; }
+
   function pill(status){
     const s = (status||"").toLowerCase();
     if (s==="available")   return `<span class="pill pill-available">Available</span>`;
     if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s==="unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
+    if (s==="unavailable" || s==="booked") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
   function actionsForRow(row){
     const s = (row.status||"").toLowerCase();
-    if (s==="available") {
-      // exactly one action on available
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
-    }
-    // non-available → undo
+    if (s==="available") return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
     return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Mark Available</button>`;
   }
 
@@ -150,7 +199,7 @@
 
   function render(){
     const areaQ = (areaFilter.value||"").toLowerCase();
-    const statusQ = statusFilter.value; // "", "Available", "Reserved", "Unavailable"
+    const statusQ = statusFilter.value;
     const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
     const filtered = beds.filter(b =>
@@ -167,11 +216,10 @@
     mountTable("tblMyReserved", mine);
   }
 
-  // Write via Apps Script
   async function callApi(payload){
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" }, // avoids preflight with Apps Script
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(payload)
     });
     return res.json();
@@ -183,16 +231,23 @@
     await loadBeds();
   };
   window.markAvailable = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse')||"").trim(); // optional
+    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
     await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
     await loadBeds();
   };
 
-  // tiny escape helpers
+  function normalizeStatusDisplay(s){
+    const low = (s||"").toLowerCase();
+    if (low==="booked") return "Unavailable";
+    if (low==="unavailable") return "Unavailable";
+    if (low==="reserved") return "Reserved";
+    if (low==="available"||low==="avail") return "Available";
+    return s || "";
+  }
+
   function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
-  // init
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
