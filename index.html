@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>BMU Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    input[type="text"] { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; }
+    button { padding: 6px 10px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; }
+    button:hover { background: #f7f7f7; }
+    .tabs { display: flex; gap: 8px; margin: 12px 0; }
+    .tab-btn { border: 1px solid #ccc; background: #f6f6f6; padding: 6px 10px; border-radius: 999px; }
+    .tab-btn.active { background: #111; color: #fff; border-color: #111; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+    th, td { border: 1px solid #e5e5e5; padding: 8px; text-align: left; }
+    th { background: #fafafa; }
+    .pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+    .avail { background: #e8f7e8; border: 1px solid #a6d9a6; }
+    .booked { background: #ffe9e9; border: 1px solid #f5bcbc; }
+    .reserved { background: #fff7e6; border: 1px solid #f6d28a; }
+    .muted { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>BMU Dashboard</h1>
+
+  <div class="row">
+    <label for="nurse">Nurse (name or email):</label>
+    <input id="nurse" type="text" placeholder="e.g. may@example.com" />
+    <button id="saveNurse">Save</button>
+    <span class="muted" id="nurseSavedNote"></span>
+  </div>
+
+  <div class="row">
+    <label for="filterArea">Filter area:</label>
+    <input id="filterArea" type="text" placeholder="Type to filter areas…" />
+    <button id="clearFilter">Clear</button>
+    <button id="refreshBtn">Refresh</button>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="available">Available</button>
+    <button class="tab-btn" data-tab="myreserved">My Reserved</button>
+    <button class="tab-btn" data-tab="overall">Overall</button>
+  </div>
+
+  <div id="available" class="panel active">
+    <h3>Available Beds</h3>
+    <div id="tblAvailable"></div>
+  </div>
+
+  <div id="myreserved" class="panel">
+    <h3>My Reserved Beds</h3>
+    <div id="tblMyReserved"></div>
+  </div>
+
+  <div id="overall" class="panel">
+    <h3>Overall (Booked / Reserved / Available)</h3>
+    <div id="tblOverall"></div>
+  </div>
+
+<script>
+  // === your live links ===
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzv8fNX6Rn9wlFExjrtyjbBzZWl9SaOKkKnjzrS5rUJAPpP00n2hIdzMXa0WO07jon0-g/exec";
+
+  // nurse identity in browser
+  const nurseInput = document.getElementById('nurse');
+  const nurseNote = document.getElementById('nurseSavedNote');
+  document.getElementById('saveNurse').onclick = () => {
+    const v = nurseInput.value.trim();
+    if (!v) return;
+    localStorage.setItem('bmu_nurse', v);
+    nurseNote.textContent = `Saved as ${v}`;
+    render();
+  };
+  const saved = localStorage.getItem('bmu_nurse') || "";
+  if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
+
+  // tabs
+  const tabs = document.querySelectorAll('.tab-btn');
+  tabs.forEach(btn => btn.addEventListener('click', () => {
+    tabs.forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+  }));
+
+  // filters
+  const filterArea = document.getElementById('filterArea');
+  document.getElementById('clearFilter').onclick = () => { filterArea.value = ""; render(); };
+  document.getElementById('refreshBtn').onclick = () => loadBeds();
+  filterArea.addEventListener('input', () => render());
+
+  // data state
+  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
+
+  async function loadBeds() {
+    try {
+      const res = await fetch(CSV_URL, { cache: 'no-store' });
+      const text = await res.text();
+      const rows = text.trim().split("\n").map(r => splitCsvRow(r));
+      if (rows.length < 2) { beds = []; render(); return; }
+
+      const header = rows[0];
+      const idx = {
+        bedID: header.indexOf("Bed ID"),
+        area: header.indexOf("Area"),
+        status: header.indexOf("Status"),
+        nurse: header.indexOf("Nurse"),
+        timeBooked: header.indexOf("Time Booked"),
+        lastUpdated: header.indexOf("Last Updated")
+      };
+
+      beds = rows.slice(1).map(r => ({
+        bedID: r[idx.bedID] || "",
+        area: r[idx.area] || "",
+        status: r[idx.status] || "",
+        nurse: r[idx.nurse] || "",
+        timeBooked: r[idx.timeBooked] || "",
+        lastUpdated: r[idx.lastUpdated] || ""
+      }));
+      render();
+    } catch (e) {
+      console.error("Failed to load CSV:", e);
+    }
+  }
+
+  // light CSV parser (handles quoted commas)
+  function splitCsvRow(row) {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < row.length; i++) {
+      const c = row[i];
+      if (c === '"') {
+        if (inQ && row[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (c === ',' && !inQ) {
+        out.push(cur); cur = '';
+      } else cur += c;
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  }
+
+  function pill(status) {
+    const s = (status || "").toLowerCase();
+    if (s === "available") return `<span class="pill avail">Available</span>`;
+    if (s === "booked") return `<span class="pill booked">Booked</span>`;
+    if (s === "reserved") return `<span class="pill reserved">Reserved</span>`;
+    return status || "";
+  }
+
+  function rowActions(row, scope) {
+    const me = (localStorage.getItem('bmu_nurse') || "").trim();
+    const s = (row.status || "").toLowerCase();
+
+    if (scope === "available") {
+      if (s === "available") {
+        return `
+          <button onclick="reserveBed('${row.bedID}')">Reserve</button>
+          <button onclick="bookBed('${row.bedID}')">Book</button>
+        `;
+      }
+      return "";
+    }
+
+    if (scope === "myreserved") {
+      if (s === "reserved" && me && row.nurse && row.nurse.toLowerCase() === me.toLowerCase()) {
+        return `
+          <button onclick="markAvailable('${row.bedID}')">Cancel</button>
+          <button onclick="bookBed('${row.bedID}')">Book</button>
+        `;
+      }
+      return "";
+    }
+
+    // overall: show all possible transitions
+    if (s === "available") {
+      return `
+        <button onclick="reserveBed('${row.bedID}')">Reserve</button>
+        <button onclick="bookBed('${row.bedID}')">Book</button>
+      `;
+    } else {
+      return `<button onclick="markAvailable('${row.bedID}')">Mark Available</button>`;
+    }
+  }
+
+  function render() {
+    const areaFilter = (filterArea.value || "").toLowerCase();
+    const me = (localStorage.getItem('bmu_nurse') || "").trim();
+
+    const avail = beds.filter(b => b.status === "Available" && (areaFilter === "" || b.area.toLowerCase().includes(areaFilter)));
+    mountTable("tblAvailable", avail, "available");
+
+    const mine = beds.filter(b =>
+      b.status === "Reserved" &&
+      me &&
+      b.nurse &&
+      b.nurse.toLowerCase() === me.toLowerCase() &&
+      (areaFilter === "" || b.area.toLowerCase().includes(areaFilter))
+    );
+    mountTable("tblMyReserved", mine, "myreserved");
+
+    const all = beds.filter(b => areaFilter === "" || b.area.toLowerCase().includes(areaFilter));
+    mountTable("tblOverall", all, "overall");
+  }
+
+  function mountTable(targetId, rows, scope) {
+    const el = document.getElementById(targetId);
+    if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
+    const html = [
+      "<table>",
+      "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th>Action</th></tr></thead>",
+      "<tbody>",
+      ...rows.map(r => `
+        <tr>
+          <td>${r.bedID}</td>
+          <td>${r.area}</td>
+          <td>${pill(r.status)}</td>
+          <td>${r.nurse}</td>
+          <td>${r.timeBooked}</td>
+          <td>${rowActions(r, scope)}</td>
+        </tr>`),
+      "</tbody></table>"
+    ].join("");
+    el.innerHTML = html;
+  }
+
+  async function callApi(payload) {
+    const res = await fetch(WEB_APP_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" }, // avoids CORS preflight with Apps Script
+      body: JSON.stringify(payload)
+    });
+    return res.json();
+  }
+
+  window.reserveBed = async (bedID) => {
+    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
+    if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
+    await callApi({ bedID, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
+    await loadBeds();
+  };
+
+  window.bookBed = async (bedID) => {
+    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
+    if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
+    await callApi({ bedID, status: "booked", nurseName: nurse, clientTime: new Date().toISOString() });
+    await loadBeds();
+  };
+
+  window.markAvailable = async (bedID) => {
+    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
+    await callApi({ bedID, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
+    await loadBeds();
+  };
+
+  // initial load + auto refresh
+  loadBeds();
+  setInterval(loadBeds, 15000);
+</script>
+</body>
+</html>
