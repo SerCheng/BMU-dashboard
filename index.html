@@ -16,7 +16,7 @@
     .panel { display:none; }
     .panel.active { display:block; }
     table { border-collapse:collapse; width:100%; margin-top:8px; }
-    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
+    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; vertical-align:top; }
     th { background:#fafafa; }
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
@@ -24,6 +24,7 @@
     .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; }
     .muted { color:#666; font-size:12px; }
     .badge { font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:999px; }
+    .sub { display:block; font-size:11px; color:#555; margin-top:2px; }
   </style>
 </head>
 <body>
@@ -66,15 +67,10 @@
   </div>
 
 <script>
-  // READ from CSV
-  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
+  // Live JSON API (your current /exec URL)
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwoy4Y4Lb2XqS_K7AtU0vyUxdjB5xK8W4qpl__Ca13QU3bAhMiMDsal7fDXBfe4-OLpUA/exec";
+  const RESERVE_MINUTES_FALLBACK = 30; // used if API doesn't return reserveMinutes
 
-  // WRITE via Apps Script (keep your same /exec URL)
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyvQaFrkBPYtn9HkRDuoOdBwiEmuIEP6UatVMcbGft2QNknT2mv16Ts5eN0bMwW5xaLWg/exec";
-  // Write key: must match Apps Script WRITE_KEY (or script property)
-  const WRITE_KEY = "CHANGE_ME"; // set the same secret here
-
-  // identity
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   const diag       = document.getElementById('diag');
@@ -89,7 +85,6 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // tabs
   const tabs = document.querySelectorAll('.tab-btn');
   tabs.forEach(btn => btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
@@ -98,156 +93,153 @@
     document.getElementById(btn.dataset.tab).classList.add('active');
   }));
 
-  // filters
   const statusFilter = document.getElementById('statusFilter');
   const areaFilter   = document.getElementById('areaFilter');
   document.getElementById('refreshBtn').onclick = () => loadBeds();
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  // data
   let beds = [];
+  let reserveMinutes = RESERVE_MINUTES_FALLBACK;
+  let tickTimer = null;
 
-  async function loadBeds() {
+  async function loadBeds(){
     try {
-      const res = await fetch(`${CSV_URL}${CSV_URL.includes('?') ? '&' : '?'}_=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-
-      const rows = text.replace(/\r/g,'').split("\n").filter(Boolean).map(splitCsvRow);
-      if (rows.length < 2) {
-        beds = []; diag.textContent = "loaded 0 rows"; render(); return;
-      }
-      const header = rows[0];
-      const idx = {
-        bedID: header.indexOf("Bed ID"),
-        area: header.indexOf("Area"),
-        status: header.indexOf("Status"),
-        nurse: header.indexOf("Nurse"),
-        timeBooked: header.indexOf("Time Booked"),
-        lastUpdated: header.indexOf("Last Updated")
-      };
-      beds = rows.slice(1).map(r => ({
-        bedID: r[idx.bedID] || "",
-        area: r[idx.area] || "",
-        status: normalizeStatusDisplay(r[idx.status] || ""),
-        nurse: r[idx.nurse] || "",
-        timeBooked: r[idx.timeBooked] || "",
-        lastUpdated: r[idx.lastUpdated] || ""
-      }));
+      const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
+      const json = await res.json();
+      beds = (json && json.ok && Array.isArray(json.beds)) ? json.beds : [];
+      reserveMinutes = (json && json.reserveMinutes) || RESERVE_MINUTES_FALLBACK;
       diag.textContent = `loaded ${beds.length} rows`;
-      render();
     } catch (e) {
-      console.error("CSV load error:", e);
-      diag.textContent = `CSV error: ${e.message || e}`;
+      console.error("API error", e);
+      diag.textContent = `API error — see console`;
+      beds = [];
     }
+    render();
+    restartTicker();
   }
 
-  function splitCsvRow(row) {
-    const out = []; let cur = '', inQ = false;
-    for (let i = 0; i < row.length; i++) {
-      const c = row[i];
-      if (c === '"') { if (inQ && row[i+1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
-      else if (c === ',' && !inQ) { out.push(cur); cur = ''; }
-      else cur += c;
-    }
-    out.push(cur);
-    return out.map(s => s.trim());
+  function restartTicker(){
+    if (tickTimer) clearInterval(tickTimer);
+    tickTimer = setInterval(() => {
+      // update countdown labels without re-fetching
+      document.querySelectorAll('[data-expiry]').forEach(el => {
+        const expiry = el.getAttribute('data-expiry');
+        el.textContent = countdownText(expiry);
+      });
+    }, 1000);
   }
 
-  function normalizeStatusDisplay(s){
-    const low = (s||"").toLowerCase();
-    if (low==="book"||low==="booked") return "Unavailable";
-    if (low==="unavailable") return "Unavailable";
-    if (low==="reserved"||low==="reserve") return "Reserved";
-    if (low==="available"||low==="avail") return "Available";
-    return s || "";
+  function countdownText(expiryIso){
+    if (!expiryIso) return "";
+    const end = Date.parse(expiryIso);
+    const now = Date.now();
+    const ms = end - now;
+    if (isNaN(end) || ms <= 0) return "expiring...";
+    const s = Math.floor(ms/1000);
+    const m = Math.floor(s/60);
+    const r = s % 60;
+    return `${m}m ${r}s left`;
   }
 
-  function pill(status) {
-    const s = (status || "").toLowerCase();
-    if (s === "available")   return `<span class="pill pill-available">Available</span>`;
-    if (s === "reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s === "unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
+  function pill(status){
+    const s = (status||"").toLowerCase();
+    if (s==="available")   return `<span class="pill pill-available">Available</span>`;
+    if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
+    if (s==="unavailable" || s==="booked") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
-  function actionsForRow(row) {
-    const s = (row.status || "").toLowerCase();
-    if (s === "available") {
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
-    }
-    return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Mark Available</button>`;
+  function fmtTime(iso){
+    if (!iso) return "";
+    const d = new Date(iso);
+    // show date + time, 24h. Tweak as you like.
+    return d.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
   }
 
-  function mountTable(targetId, rows) {
+  function actionsForRow(row){
+    const s = (row.status||"").toLowerCase();
+    if (s==="available") {
+      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Reserve 30m</button>`;
+    }
+    return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Mark Available</button>`;
+  }
+
+  function mountTable(targetId, rows){
     const el = document.getElementById(targetId);
     if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
-    el.innerHTML = [
+    const html = [
       "<table>",
       "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
       "<tbody>",
-      ...rows.map(r => `
+      ...rows.map(r=>`
         <tr>
-          <td>${escapeHtml(r.bedID)}</td>
-          <td>${escapeHtml(r.area)}</td>
-          <td>${pill(r.status)}</td>
-          <td>${escapeHtml(r.nurse)}</td>
-          <td>${escapeHtml(r.timeBooked)}</td>
+          <td>${escapeHtml(String(r.bedID))}</td>
+          <td>${escapeHtml(r.area||"")}</td>
+          <td>${pill(r.status||"")}${r.expiry && (r.status||"").toLowerCase()==="reserved" ? `<span class="sub" data-expiry="${escapeAttr(r.expiry)}">${countdownText(r.expiry)}</span>` : ""}</td>
+          <td>${escapeHtml(r.nurse||"")}</td>
+          <td>${fmtTime(r.timeBooked||"")}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
-        </tr>`),
+        </tr>
+      `),
       "</tbody></table>"
     ].join("");
+    el.innerHTML = html;
   }
 
-  function render() {
-    const areaQ = (areaFilter.value || "").toLowerCase();
-    const statusQ = (statusFilter.value || "");
-    const me = (localStorage.getItem('bmu_nurse') || "").trim().toLowerCase();
+  function render(){
+    const areaQ = (areaFilter.value||"").toLowerCase();
+    const statusQ = (statusFilter.value||"").toLowerCase();
+    const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
     const filtered = beds.filter(b =>
-      (areaQ === "" || (b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ === "" || (b.status||"") === statusQ)
+      (areaQ==="" || String(b.area||"").toLowerCase().includes(areaQ)) &&
+      (statusQ==="" || String(b.status||"").toLowerCase() === statusQ)
     );
     mountTable("tblOverall", filtered);
 
     const mine = beds.filter(b => {
-      const nurse = (b.nurse || "").toLowerCase();
-      const s = (b.status || "").toLowerCase();
-      return me && nurse === me && (s === "reserved" || s === "unavailable");
+      const nurse = (b.nurse||"").toLowerCase();
+      const s = (b.status||"").toLowerCase();
+      return me && nurse===me && (s==="reserved" || s==="unavailable");
     });
     mountTable("tblMyReserved", mine);
   }
 
-  // Optimistic UI + POST with key
+  // Optimistic UI
   function optimisticUpdate(bedID, patch) {
     const idx = beds.findIndex(b => String(b.bedID) === String(bedID));
     if (idx >= 0) { beds[idx] = { ...beds[idx], ...patch }; render(); }
   }
 
-  async function callApi(payload) {
+  async function callApi(payload){
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ key: WRITE_KEY, ...payload })
+      body: JSON.stringify(payload)
     });
     return res.json();
   }
 
   window.reserveBed = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
+    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
     if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
-    optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: new Date().toLocaleDateString() });
+
+    const nowIso = new Date().toISOString();
+    // instant UI (also compute expiry locally as fallback)
+    const expIso = new Date(Date.parse(nowIso) + (reserveMinutes * 60000)).toISOString();
+    optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: nowIso, expiry: expIso });
+
     try {
-      await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
+      await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
     } finally {
-      await loadBeds();
+      await loadBeds(); // re-sync live from API
     }
   };
 
   window.markAvailable = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
-    optimisticUpdate(bedID, { status: "Available", nurse: "", timeBooked: "" });
+    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
+    optimisticUpdate(bedID, { status: "Available", nurse: "", timeBooked: "", expiry: "" });
     try {
       await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
     } finally {
@@ -255,11 +247,12 @@
     }
   };
 
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  // escape helpers
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
+  // init
   loadBeds();
-  setInterval(loadBeds, 15000);
 </script>
 </body>
 </html>
