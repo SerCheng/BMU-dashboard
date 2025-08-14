@@ -19,10 +19,12 @@
     th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
     th { background:#fafafa; }
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
-    .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
+    .pill-available   { background:#e8f7e8; border:1px solid #a6d9a9; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; } /* red */
+    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
     .muted { color:#666; font-size:12px; }
+    .badge { font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:999px; }
+    .err { color:#9b111e }
   </style>
 </head>
 <body>
@@ -33,168 +35,7 @@
     <input id="nurse" type="text" placeholder="e.g. may@example.com" />
     <button id="saveNurse">Save</button>
     <span class="muted" id="nurseSavedNote"></span>
+    <span id="diag" class="badge muted"></span>
   </div>
 
   <div class="tabs">
-    <button class="tab-btn active" data-tab="overall">Overall</button>
-    <button class="tab-btn" data-tab="myreserved">My Reserved</button>
-  </div>
-
-  <div id="overall" class="panel active">
-    <div class="row">
-      <label>Status:
-        <select id="statusFilter">
-          <option value="">All</option>
-          <option value="Available">Available</option>
-          <option value="Reserved">Reserved</option>
-          <option value="Unavailable">Unavailable</option>
-        </select>
-      </label>
-      <label>Area:
-        <input id="areaFilter" type="text" placeholder="Type area to filter…" />
-      </label>
-      <button id="refreshBtn">Refresh</button>
-    </div>
-    <div id="tblOverall"></div>
-  </div>
-
-  <div id="myreserved" class="panel">
-    <div class="row"><span class="muted">Showing beds reserved or unavailable by you.</span></div>
-    <div id="tblMyReserved"></div>
-  </div>
-
-<script>
-  // UPDATED to your new Apps Script web app (JSON API)
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzwKczEuLiVVsipbIvLGBY1ZGXKO1rl9lb5y5Z9fwXn8me7O4OVxwhHS0g1Y5o7hguMjg/exec";
-
-  // Nurse identity
-  const nurseInput = document.getElementById('nurse');
-  const nurseNote  = document.getElementById('nurseSavedNote');
-  document.getElementById('saveNurse').onclick = () => {
-    const v = nurseInput.value.trim();
-    if (!v) return;
-    localStorage.setItem('bmu_nurse', v);
-    nurseNote.textContent = `Saved as ${v}`;
-    render();
-  };
-  const saved = localStorage.getItem('bmu_nurse') || "";
-  if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
-
-  // Tabs
-  const tabs = document.querySelectorAll('.tab-btn');
-  tabs.forEach(btn => btn.addEventListener('click', () => {
-    tabs.forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
-  }));
-
-  // Filters
-  const statusFilter = document.getElementById('statusFilter');
-  const areaFilter   = document.getElementById('areaFilter');
-  document.getElementById('refreshBtn').onclick = () => loadBeds();
-  statusFilter.onchange = () => render();
-  areaFilter.oninput    = () => render();
-
-  // Data
-  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
-
-  // Read from Apps Script as JSON (no CSV)
-  async function loadBeds(){
-    const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
-    const json = await res.json();
-    beds = (json && json.ok) ? json.beds : [];
-    render();
-  }
-
-  // Render helpers
-  function pill(status){
-    const s = (status||"").toLowerCase();
-    if (s==="available")   return `<span class="pill pill-available">Available</span>`;
-    if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s==="unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
-    return status || "";
-  }
-
-  function actionsForRow(row){
-    const s = (row.status||"").toLowerCase();
-    if (s==="available") {
-      // exactly one action on available
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
-    }
-    // non-available → undo
-    return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Mark Available</button>`;
-  }
-
-  function mountTable(targetId, rows){
-    const el = document.getElementById(targetId);
-    if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
-    const html = [
-      "<table>",
-      "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
-      "<tbody>",
-      ...rows.map(r=>`
-        <tr>
-          <td>${escapeHtml(r.bedID)}</td>
-          <td>${escapeHtml(r.area)}</td>
-          <td>${pill(r.status)}</td>
-          <td>${escapeHtml(r.nurse)}</td>
-          <td>${escapeHtml(r.timeBooked)}</td>
-          <td style="white-space:nowrap">${actionsForRow(r)}</td>
-        </tr>
-      `),
-      "</tbody></table>"
-    ].join("");
-    el.innerHTML = html;
-  }
-
-  function render(){
-    const areaQ = (areaFilter.value||"").toLowerCase();
-    const statusQ = statusFilter.value; // "", "Available", "Reserved", "Unavailable"
-    const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
-
-    const filtered = beds.filter(b =>
-      (areaQ==="" || (b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ==="" || (b.status||"") === statusQ)
-    );
-    mountTable("tblOverall", filtered);
-
-    const mine = beds.filter(b => {
-      const nurse = (b.nurse||"").toLowerCase();
-      const s = (b.status||"").toLowerCase();
-      return me && nurse===me && (s==="reserved" || s==="unavailable");
-    });
-    mountTable("tblMyReserved", mine);
-  }
-
-  // Write via Apps Script
-  async function callApi(payload){
-    const res = await fetch(WEB_APP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" }, // avoids preflight with Apps Script
-      body: JSON.stringify(payload)
-    });
-    return res.json();
-  }
-  window.reserveBed = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
-    if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
-    await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
-    await loadBeds();
-  };
-  window.markAvailable = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse')||"").trim(); // optional
-    await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
-    await loadBeds();
-  };
-
-  // tiny escape helpers
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
-
-  // init
-  loadBeds();
-  setInterval(loadBeds, 15000);
-</script>
-</body>
-</html>
