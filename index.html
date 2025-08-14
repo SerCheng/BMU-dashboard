@@ -7,7 +7,8 @@
   <style>
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
     .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
+    input[type="text"] { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
+    select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
     button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
     button:hover { background:#f7f7f7; }
     .tabs { display:flex; gap:8px; margin:12px 0; }
@@ -15,16 +16,16 @@
     .tab-btn.active { background:#111; color:#fff; border-color:#111; }
     .panel { display:none; }
     .panel.active { display:block; }
+
     table { border-collapse:collapse; width:100%; margin-top:8px; }
     th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
     th { background:#fafafa; }
+
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
+    .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; } /* red */
     .muted { color:#666; font-size:12px; }
-    .badge { font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:999px; }
-    .err { color:#9b111e }
   </style>
 </head>
 <body>
@@ -35,7 +36,6 @@
     <input id="nurse" type="text" placeholder="e.g. may@example.com" />
     <button id="saveNurse">Save</button>
     <span class="muted" id="nurseSavedNote"></span>
-    <span id="diag" class="badge muted"></span>
   </div>
 
   <div class="tabs">
@@ -67,12 +67,13 @@
   </div>
 
 <script>
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzwKczEuLiVVsipbIvLGBY1ZGXKO1rl9lb5y5Z9fwXn8me7O4OVxwhHS0g1Y5o7hguMjg/exec";
+  // --- Your live endpoints ---
+  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pubhtml?gid=0&single=true&output=csv";
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyhvY8NM0RRqfXo__He-kxyGi8iX7_Ld2Z2BIC43r1oetjlQCuXlD0FX0ybNnsTyvWA2w/exec";
 
+  // Store nurse identity locally
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
-  const diag       = document.getElementById('diag');
-
   document.getElementById('saveNurse').onclick = () => {
     const v = nurseInput.value.trim();
     if (!v) return;
@@ -83,6 +84,7 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
+  // Tabs
   const tabs = document.querySelectorAll('.tab-btn');
   tabs.forEach(btn => btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
@@ -91,84 +93,97 @@
     document.getElementById(btn.dataset.tab).classList.add('active');
   }));
 
+  // Filters
   const statusFilter = document.getElementById('statusFilter');
   const areaFilter   = document.getElementById('areaFilter');
   document.getElementById('refreshBtn').onclick = () => loadBeds();
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  let rawBeds = [];     // raw from API
-  let latestBeds = [];  // deduped by bedID (latest wins)
+  // Data state
+  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
 
-  async function loadBeds(){
+  async function loadBeds() {
     try {
-      const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
-      const json = await res.json();
-      rawBeds = (json && json.ok && Array.isArray(json.beds)) ? json.beds : [];
-      latestBeds = pickLatestPerBedID(rawBeds);
-      diag.textContent = `loaded ${rawBeds.length} rows → ${latestBeds.length} latest`;
-      diag.classList.remove('err');
+      // cache-bust so we always read fresh CSV
+      const res = await fetch(`${CSV_URL}${CSV_URL.includes('?') ? '&' : '?'}_=${Date.now()}`, { cache: 'no-store' });
+      const text = await res.text();
+      const rows = text.trim().split("\n").map(r => splitCsvRow(r));
+      if (rows.length < 2) { beds = []; render(); return; }
+
+      const header = rows[0];
+      const idx = {
+        bedID: header.indexOf("Bed ID"),
+        area: header.indexOf("Area"),
+        status: header.indexOf("Status"),
+        nurse: header.indexOf("Nurse"),
+        timeBooked: header.indexOf("Time Booked"),
+        lastUpdated: header.indexOf("Last Updated")
+      };
+
+      beds = rows.slice(1).map(r => ({
+        bedID: r[idx.bedID] || "",
+        area: r[idx.area] || "",
+        status: r[idx.status] || "",
+        nurse: r[idx.nurse] || "",
+        timeBooked: r[idx.timeBooked] || "",
+        lastUpdated: r[idx.lastUpdated] || ""
+      }));
+      render();
     } catch (e) {
-      console.error("Fetch error", e);
-      diag.textContent = `API error — see console`;
-      diag.classList.add('err');
-      rawBeds = [];
-      latestBeds = [];
+      console.error("Failed to load CSV:", e);
     }
-    render();
   }
 
-  // choose the newest row per bedID using lastUpdated, then timeBooked as tiebreaker
-  function pickLatestPerBedID(rows){
-    const map = new Map();
-    for (const r of rows){
-      const id = String(r.bedID || "").trim();
-      if (!id) continue;
-      const curr = map.get(id);
-      if (!curr) { map.set(id, r); continue; }
-
-      const a = ts(curr.lastUpdated) || ts(curr.timeBooked) || 0;
-      const b = ts(r.lastUpdated)    || ts(r.timeBooked)    || 0;
-      if (b >= a) map.set(id, r);
+  // CSV parser (handles quoted commas)
+  function splitCsvRow(row) {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < row.length; i++) {
+      const c = row[i];
+      if (c === '"') {
+        if (inQ && row[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (c === ',' && !inQ) {
+        out.push(cur); cur = '';
+      } else cur += c;
     }
-    // normalize status titles
-    return Array.from(map.values()).map(x => ({ ...x, status: normalizeStatusDisplay(x.status) }));
+    out.push(cur);
+    return out.map(s => s.trim());
   }
 
-  function ts(s){
-    if (!s) return 0;
-    const t = Date.parse(s);
-    return isNaN(t) ? 0 : t;
-  }
-
-  function pill(status){
-    const s = (status||"").toLowerCase();
-    if (s==="available")   return `<span class="pill pill-available">Available</span>`;
-    if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s==="unavailable" || s==="booked") return `<span class="pill pill-unavailable">Unavailable</span>`;
+  function pill(status) {
+    const s = (status || "").toLowerCase();
+    if (s === "available")   return `<span class="pill pill-available">Available</span>`;
+    if (s === "reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
+    if (s === "unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
-  function actionsForRow(row){
-    const s = (row.status||"").toLowerCase();
-    if (s==="available") return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Reserve 30m</button>`;
-    return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Mark Available</button>`;
+  function actionsForRow(row) {
+    const s = (row.status || "").toLowerCase();
+    // Available → exactly one action: Reserve 30m
+    if (s === "available") {
+      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
+    }
+    // Reserved/Unavailable → Mark Available (undo)
+    return `<button onclick="markAvailable('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Mark Available</button>`;
   }
 
-  function mountTable(targetId, rows){
+  function mountTable(targetId, rows) {
     const el = document.getElementById(targetId);
     if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
     const html = [
       "<table>",
       "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
       "<tbody>",
-      ...rows.map(r=>`
+      ...rows.map(r => `
         <tr>
-          <td>${escapeHtml(String(r.bedID))}</td>
-          <td>${escapeHtml(r.area||"")}</td>
-          <td>${pill(r.status||"")}</td>
-          <td>${escapeHtml(r.nurse||"")}</td>
-          <td>${escapeHtml(r.timeBooked||"")}</td>
+          <td>${escapeHtml(r.bedID)}</td>
+          <td>${escapeHtml(r.area)}</td>
+          <td>${pill(r.status)}</td>
+          <td>${escapeHtml(r.nurse)}</td>
+          <td>${escapeHtml(r.timeBooked)}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
         </tr>`),
       "</tbody></table>"
@@ -176,57 +191,55 @@
     el.innerHTML = html;
   }
 
-  function render(){
-    const areaQ = (areaFilter.value||"").toLowerCase();
-    const statusQ = (statusFilter.value||"").toLowerCase();
-    const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
+  function render() {
+    const areaQ = (areaFilter.value || "").toLowerCase();
+    const statusQ = (statusFilter.value || "");
+    const me = (localStorage.getItem('bmu_nurse') || "").trim().toLowerCase();
 
-    const filtered = latestBeds.filter(b =>
-      (areaQ==="" || String(b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ==="" || String(b.status||"").toLowerCase() === statusQ)
+    // Overall with filters
+    const filtered = beds.filter(b =>
+      (areaQ === "" || (b.area||"").toLowerCase().includes(areaQ)) &&
+      (statusQ === "" || (b.status||"") === statusQ)
     );
     mountTable("tblOverall", filtered);
 
-    const mine = latestBeds.filter(b => {
-      const nurse = (b.nurse||"").toLowerCase();
-      const s = (b.status||"").toLowerCase();
-      return me && nurse===me && (s==="reserved" || s==="unavailable");
+    // My Reserved: show rows by me where status is Reserved or Unavailable
+    const mine = beds.filter(b => {
+      const nurse = (b.nurse || "").toLowerCase();
+      const s = (b.status || "").toLowerCase();
+      return me && nurse === me && (s === "reserved" || s === "unavailable");
     });
     mountTable("tblMyReserved", mine);
   }
 
-  async function callApi(payload){
+  // API calls to Apps Script
+  async function callApi(payload) {
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/plain" }, // avoids CORS preflight with Apps Script
       body: JSON.stringify(payload)
     });
     return res.json();
   }
+
   window.reserveBed = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
-    if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
+    const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
+    if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
     await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
     await loadBeds();
   };
+
   window.markAvailable = async (bedID, area) => {
-    const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
+    const nurse = (localStorage.getItem('bmu_nurse') || "").trim(); // optional
     await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
     await loadBeds();
   };
 
-  function normalizeStatusDisplay(s){
-    const low = (s||"").toLowerCase();
-    if (low==="book"||low==="booked") return "Unavailable";
-    if (low==="unavailable") return "Unavailable";
-    if (low==="reserved"||low==="reserve") return "Reserved";
-    if (low==="available"||low==="avail") return "Available";
-    return s || "";
-  }
-
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  // Small helpers to avoid HTML/attribute injection if IDs contain slashes etc.
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
+  // First load + periodic refresh
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
