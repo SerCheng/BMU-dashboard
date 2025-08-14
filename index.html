@@ -69,10 +69,10 @@
   // READ from your published CSV
   const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
 
-  // WRITE via Apps Script (reserve / mark available)
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzwKczEuLiVVsipbIvLGBY1ZGXKO1rl9lb5y5Z9fwXn8me7O4OVxwhHS0g1Y5o7hguMjg/exec";
+  // WRITE through your Apps Script web app
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzX0T_38NwaKxiOxcxu0IqZAxJuXCmVvL-rdndr9JodkVbuN0pTkKE5seJUqR0pgaAoFg/exec";
 
-  // Nurse identity (local to browser)
+  // identity
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   const diag       = document.getElementById('diag');
@@ -87,7 +87,7 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // Tabs
+  // tabs
   const tabs = document.querySelectorAll('.tab-btn');
   tabs.forEach(btn => btn.addEventListener('click', () => {
     tabs.forEach(b => b.classList.remove('active'));
@@ -96,15 +96,15 @@
     document.getElementById(btn.dataset.tab).classList.add('active');
   }));
 
-  // Filters
+  // filters
   const statusFilter = document.getElementById('statusFilter');
   const areaFilter   = document.getElementById('areaFilter');
   document.getElementById('refreshBtn').onclick = () => loadBeds();
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  // Data
-  let beds = []; // {bedID, area, status, nurse, timeBooked, lastUpdated}
+  // data
+  let beds = [];
 
   async function loadBeds() {
     try {
@@ -112,7 +112,6 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
 
-      // Normalize line endings and split
       const rows = text.replace(/\r/g,'').split("\n").filter(Boolean).map(splitCsvRow);
       if (rows.length < 2) {
         beds = [];
@@ -121,7 +120,6 @@
         return;
       }
 
-      // Map columns by header names (must match exactly)
       const header = rows[0];
       const idx = {
         bedID: header.indexOf("Bed ID"),
@@ -149,7 +147,7 @@
     }
   }
 
-  // CSV parser that handles quoted fields/commas
+  // CSV parser
   function splitCsvRow(row) {
     const out = [];
     let cur = '', inQ = false;
@@ -230,12 +228,17 @@
     mountTable("tblMyReserved", mine);
   }
 
-  // Write via Apps Script (Reserve / Mark Available)
+  /* ---------- Write actions with optimistic UI ---------- */
+
+  function optimisticUpdate(bedID, patch) {
+    const idx = beds.findIndex(b => String(b.bedID) === String(bedID));
+    if (idx >= 0) { beds[idx] = { ...beds[idx], ...patch }; render(); }
+  }
+
   async function callApi(payload) {
-    if (!WEB_APP_URL) return { ok:false, error:"No WEB_APP_URL set" };
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" }, // avoids preflight with Apps Script
+      headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(payload)
     });
     return res.json();
@@ -244,21 +247,33 @@
   window.reserveBed = async (bedID, area) => {
     const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
     if (!nurse) { alert("Please enter your Nurse name/email and click Save first."); return; }
-    await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
-    await loadBeds();
+
+    // show immediately
+    optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: new Date().toLocaleDateString() });
+
+    try {
+      await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: new Date().toISOString() });
+    } finally {
+      await loadBeds(); // re-sync from CSV
+    }
   };
 
   window.markAvailable = async (bedID, area) => {
     const nurse = (localStorage.getItem('bmu_nurse') || "").trim();
-    await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
-    await loadBeds();
+    optimisticUpdate(bedID, { status: "Available", nurse: "", timeBooked: "" });
+
+    try {
+      await callApi({ bedID, area, status: "available", nurseName: nurse, clientTime: new Date().toISOString() });
+    } finally {
+      await loadBeds();
+    }
   };
 
-  // Escape helpers
+  // escapes
   function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
-  // Go
+  // go
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
