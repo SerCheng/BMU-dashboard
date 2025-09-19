@@ -1,77 +1,21 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <title>BMU Dashboard</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
-    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
-    button:hover { background:#f7f7f7; }
-    .tabs { display:flex; gap:8px; margin:12px 0; }
-    .tab-btn { border:1px solid #ccc; background:#f6f6f6; padding:6px 10px; border-radius:999px; }
-    .tab-btn.active { background:#111; color:#fff; border-color:#111; }
-    .panel { display:none; }
-    .panel.active { display:block; }
-
-    table { border-collapse:collapse; width:100%; margin-top:8px; }
-    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
-    th { background:#fafafa; }
-
-    .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
-    .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
-    .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
-    .muted { color:#666; font-size:12px; }
-  </style>
-</head>
-<body>
-  <h1>BMU Dashboard</h1>
-
-  <div class="row">
-    <label for="nurse">Nurse (name or email):</label>
-    <input id="nurse" type="text" placeholder="e.g. may@example.com" />
-    <button id="saveNurse">Save</button>
-    <span class="muted" id="nurseSavedNote"></span>
-  </div>
-
-  <div class="tabs">
-    <button class="tab-btn active" data-tab="overall">Overall</button>
-    <button class="tab-btn" data-tab="myreserved">My Reserved</button>
-  </div>
-
-  <div id="overall" class="panel active">
-    <div class="row">
-      <label>Status:
-        <select id="statusFilter">
-          <option value="">All</option>
-          <option value="Available">Available</option>
-          <option value="Reserved">Reserved</option>
-          <option value="Unavailable">Unavailable</option>
-        </select>
-      </label>
-      <label>Area:
-        <input id="areaFilter" type="text" placeholder="Type area to filter…" />
-      </label>
-      <button id="refreshBtn">Refresh</button>
-    </div>
-    <div id="tblOverall"></div>
-  </div>
-
-  <div id="myreserved" class="panel">
-    <div class="row"><span class="muted">Showing beds reserved or unavailable by you.</span></div>
-    <div id="tblMyReserved"></div>
-  </div>
-
 <script>
-  // === CONFIG ===
+  // ===== endpoints =====
   const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzBmAYNv4eTLAwAZFj-MvGHJsplP2Ugen8e6hzypnIUhLE4nKBxvIhY5M9RlrBqxbX4aw/exec";
+  const RESERVE_MINUTES_FALLBACK = 30;
 
-  // Nurse identity
+  // ===== ui refs =====
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
+  const diag       = document.getElementById('diag');
+  const statusFilter = document.getElementById('statusFilter');
+  const areaFilter   = document.getElementById('areaFilter');
+  document.getElementById('refreshBtn').onclick = () => loadBeds();
+  statusFilter.onchange = () => render();
+  areaFilter.oninput    = () => render();
+
+  // tabs already wired in your page (if you have tabs). If not, ignore.
+
+  // ===== nurse identity =====
   document.getElementById('saveNurse').onclick = () => {
     const v = nurseInput.value.trim();
     if (!v) return;
@@ -82,88 +26,172 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // Tabs
-  const tabs = document.querySelectorAll('.tab-btn');
-  tabs.forEach(btn => btn.addEventListener('click', () => {
-    tabs.forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
-  }));
-
-  // Filters
-  const statusFilter = document.getElementById('statusFilter');
-  const areaFilter   = document.getElementById('areaFilter');
-  document.getElementById('refreshBtn').onclick = () => loadBeds();
-  statusFilter.onchange = () => render();
-  areaFilter.oninput    = () => render();
-
-  // Data
+  // ===== state =====
   let beds = [];
+  let reserveMinutes = RESERVE_MINUTES_FALLBACK;
+  let tickTimer = null;
 
-  async function loadBeds(){
-    try {
-      const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
-      const json = await res.json();
-      beds = (json && json.ok) ? json.beds : [];
-      render();
-    } catch (e) {
-      console.error("API fetch failed", e);
+  // "pending overlay" cache (keeps recent reserves visible across refresh)
+  const PENDING_KEY = "bmu_pending_v1";
+  const STICKY_MS = 5 * 60 * 1000; // show local overlay for up to 5 minutes
+
+  function loadPending(){
+    try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "{}"); } catch { return {}; }
+  }
+  function savePending(obj){
+    localStorage.setItem(PENDING_KEY, JSON.stringify(obj));
+  }
+  function cleanupPending(){
+    const now = Date.now();
+    const p = loadPending();
+    let changed = false;
+    Object.keys(p).forEach(bedID => {
+      if (p[bedID].until <= now) { delete p[bedID]; changed = true; }
+    });
+    if (changed) savePending(p);
+    return p;
+  }
+  function setPendingReserve(bedID, nurse, timeIso){
+    const p = cleanupPending();
+    p[bedID] = { status:"Reserved", nurse, timeBooked: timeIso, until: Date.now() + STICKY_MS };
+    savePending(p);
+  }
+  function clearPending(bedID){
+    const p = loadPending();
+    if (p[bedID]) { delete p[bedID]; savePending(p); }
+  }
+  function overlayPending(targetBeds){
+    // overwrite the server row with the pending row if still within sticky time
+    const p = cleanupPending();
+    const map = Object.fromEntries(targetBeds.map((b,i)=>[String(b.bedID), i]));
+    Object.entries(p).forEach(([bedID, patch])=>{
+      const i = map[String(bedID)];
+      if (i !== undefined) {
+        targetBeds[i] = { ...targetBeds[i], ...patch };
+      }
+    });
+    if (Object.keys(p).length) diag.textContent = `API ok (${targetBeds.length} rows) • overlaying recent updates`;
+  }
+
+  // ===== helpers =====
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
+
+  async function fetchJsonWithRetry(url, tries=3, delayMs=600){
+    let lastErr;
+    for (let i=0;i<tries;i++){
+      try{
+        const res = await fetch(url, { cache:'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.json();
+      }catch(e){ lastErr = e; await sleep(delayMs); }
     }
+    throw lastErr || new Error('fetch failed');
   }
 
   function pill(status){
     const s = (status||"").toLowerCase();
     if (s==="available")   return `<span class="pill pill-available">Available</span>`;
     if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s==="unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
+    if (s==="unavailable" || s==="booked") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
+  function fmtTime(iso){
+    if (!iso) return "";
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+  }
+
+  function expiryFromRow(row){
+    if ((row.status||"").toLowerCase()!=="reserved" || !row.timeBooked) return "";
+    const start = Date.parse(row.timeBooked);
+    if (isNaN(start)) return "";
+    return new Date(start + (reserveMinutes*60000)).toISOString();
+  }
+  function countdownText(expiryIso){
+    if (!expiryIso) return "";
+    const end = Date.parse(expiryIso), now = Date.now(), ms = end - now;
+    if (isNaN(end) || ms <= 0) return "expiring…";
+    const s = Math.floor(ms/1000), m = Math.floor(s/60), r = s%60;
+    return `${m}m ${r}s left`;
+  }
+  function restartTicker(){
+    if (tickTimer) clearInterval(tickTimer);
+    tickTimer = setInterval(() => {
+      document.querySelectorAll('[data-expiry]').forEach(el => {
+        el.textContent = countdownText(el.getAttribute('data-expiry'));
+      });
+    }, 1000);
+  }
+
+  // ===== load (JSON only) =====
+  async function loadBeds(){
+    try {
+      const json = await fetchJsonWithRetry(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, 3, 600);
+      if (!json || !json.ok || !Array.isArray(json.beds)) throw new Error("Bad JSON payload");
+      beds = json.beds;
+      reserveMinutes = json.reserveMinutes || RESERVE_MINUTES_FALLBACK;
+
+      // overlay recent local updates so refresh doesn't "lose" a just-made reservation
+      overlayPending(beds);
+
+      diag.textContent = `API ok (${beds.length} rows)`;
+      render();
+      restartTicker();
+    } catch (e) {
+      console.error("API error:", e);
+      diag.textContent = `API error: ${e.message || e}`;
+      // keep whatever we were showing; don’t blank the table on a transient hiccup
+    }
+  }
+
+  // ===== render =====
   function actionsForRow(row){
-    const s = (row.status||"").toLowerCase();
-    if (s==="available") {
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
-    }
-    if (s==="reserved") {
-      return `<span class="muted">Reserved</span>`;
-    }
-    if (s==="unavailable") {
-      return ""; // No action for unavailable
+    // Only show Reserve when Available; otherwise blank (no "Mark Available")
+    if ((row.status||"").toLowerCase()==="available") {
+      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Reserve 30m</button>`;
     }
     return "";
+  }
+
+  function rowStatusCell(row){
+    const p = pill(row.status||"");
+    const exp = expiryFromRow(row);
+    if (exp) return `${p}<span class="sub" data-expiry="${escapeAttr(exp)}">${countdownText(exp)}</span>`;
+    return p;
   }
 
   function mountTable(targetId, rows){
     const el = document.getElementById(targetId);
     if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
-    const html = [
+    el.innerHTML = [
       "<table>",
       "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
       "<tbody>",
       ...rows.map(r=>`
         <tr>
-          <td>${escapeHtml(r.bedID)}</td>
-          <td>${escapeHtml(r.area)}</td>
-          <td>${pill(r.status)}</td>
-          <td>${escapeHtml(r.nurse)}</td>
-          <td>${escapeHtml(r.timeBooked)}</td>
+          <td>${escapeHtml(String(r.bedID))}</td>
+          <td>${escapeHtml(r.area||"")}</td>
+          <td>${rowStatusCell(r)}</td>
+          <td>${escapeHtml(r.nurse||"")}</td>
+          <td>${fmtTime(r.timeBooked||"")}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
         </tr>
       `),
       "</tbody></table>"
     ].join("");
-    el.innerHTML = html;
   }
 
   function render(){
     const areaQ = (areaFilter.value||"").toLowerCase();
-    const statusQ = statusFilter.value;
+    const statusQ = (statusFilter.value||"").toLowerCase();
     const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
     const filtered = beds.filter(b =>
-      (areaQ==="" || (b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ==="" || (b.status||"") === statusQ)
+      (areaQ==="" || String(b.area||"").toLowerCase().includes(areaQ)) &&
+      (statusQ==="" || String(b.status||"").toLowerCase() === statusQ)
     );
     mountTable("tblOverall", filtered);
 
@@ -172,31 +200,54 @@
       const s = (b.status||"").toLowerCase();
       return me && nurse===me && (s==="reserved" || s==="unavailable");
     });
-    mountTable("tblMyReserved", mine);
+    if (document.getElementById("tblMyReserved")) {
+      mountTable("tblMyReserved", mine);
+    }
   }
 
+  // ===== write (reserve only) =====
   async function callApi(payload){
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": "text/plain" }, // avoid preflight
       body: JSON.stringify(payload)
     });
-    return res.json();
+    const text = await res.text();
+    let json; try { json = JSON.parse(text); } catch { json = { ok:false, raw:text }; }
+    return { status: res.status, json };
+  }
+
+  function optimisticUpdate(bedID, patch) {
+    const idx = beds.findIndex(b => String(b.bedID) === String(bedID));
+    if (idx >= 0) { beds[idx] = { ...beds[idx], ...patch }; render(); }
   }
 
   window.reserveBed = async (bedID, area) => {
     const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
-    if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
+    if (!nurse) { alert("Enter your Nurse name/email and click Save first."); return; }
     const nowIso = new Date().toISOString();
-    await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
-    await loadBeds();
+
+    // optimistic UI
+    optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: nowIso });
+    // record pending overlay so a hard refresh still shows this for a few minutes
+    setPendingReserve(bedID, nurse, nowIso);
+
+    try {
+      await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
+      // once the server reflects it, we can clear the local pending for this bed
+      // (doLoad will pull server state). We'll clear after first successful refresh.
+    } finally {
+      // gentle retries to refresh from JSON
+      await sleep(600); await loadBeds();
+      await sleep(800); await loadBeds();
+      // after two refreshes, if server shows Reserved, clear pending
+      const row = beds.find(b => String(b.bedID) === String(bedID));
+      if (row && (row.status||"").toLowerCase()==="reserved" && (row.nurse||"")===nurse) {
+        clearPending(bedID);
+      }
+    }
   };
 
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
-
+  // go
   loadBeds();
-  setInterval(loadBeds, 15000);
 </script>
-</body>
-</html>
