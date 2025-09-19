@@ -1,78 +1,9 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8" />
-  <title>BMU Dashboard</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
-    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
-    input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
-    button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
-    button:hover { background:#f7f7f7; }
-    .tabs { display:flex; gap:8px; margin:12px 0; }
-    .tab-btn { border:1px solid #ccc; background:#f6f6f6; padding:6px 10px; border-radius:999px; }
-    .tab-btn.active { background:#111; color:#fff; border-color:#111; }
-    .panel { display:none; }
-    .panel.active { display:block; }
-    table { border-collapse:collapse; width:100%; margin-top:8px; }
-    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; vertical-align:top; }
-    th { background:#fafafa; }
-    .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
-    .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
-    .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; }
-    .muted { color:#666; font-size:12px; }
-    .badge { font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:999px; }
-    .sub { display:block; font-size:11px; color:#555; margin-top:2px; }
-  </style>
-</head>
-<body>
-  <h1>BMU Dashboard</h1>
-
-  <div class="row">
-    <label for="nurse">Nurse (name or email):</label>
-    <input id="nurse" type="text" placeholder="e.g. may@example.com" />
-    <button id="saveNurse">Save</button>
-    <span class="muted" id="nurseSavedNote"></span>
-    <span id="diag" class="badge muted"></span>
-  </div>
-
-  <div class="tabs">
-    <button class="tab-btn active" data-tab="overall">Overall</button>
-    <button class="tab-btn" data-tab="myreserved">My Reserved</button>
-  </div>
-
-  <div id="overall" class="panel active">
-    <div class="row">
-      <label>Status:
-        <select id="statusFilter">
-          <option value="">All</option>
-          <option value="Available">Available</option>
-          <option value="Reserved">Reserved</option>
-          <option value="Unavailable">Unavailable</option>
-        </select>
-      </label>
-      <label>Area:
-        <input id="areaFilter" type="text" placeholder="Type area to filter…" />
-      </label>
-      <button id="refreshBtn">Refresh</button>
-    </div>
-    <div id="tblOverall"></div>
-  </div>
-
-  <div id="myreserved" class="panel">
-    <div class="row"><span class="muted">Showing beds reserved or unavailable by you.</span></div>
-    <div id="tblMyReserved"></div>
-  </div>
-
 <script>
-  // Endpoints
-  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzBmAYNv4eTLAwAZFj-MvGHJsplP2Ugen8e6hzypnIUhLE4nKBxvIhY5M9RlrBqxbX4aw/exec";
+  // Live JSON first, CSV only as last resort
+  const WEB_APP_URL = "YOUR_EXEC_URL_HERE"; // keep your current /exec URL
   const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
   const RESERVE_MINUTES_FALLBACK = 30;
 
-  // UI refs
   const nurseInput = document.getElementById('nurse');
   const nurseNote  = document.getElementById('nurseSavedNote');
   const diag       = document.getElementById('diag');
@@ -82,16 +13,6 @@
   statusFilter.onchange = () => render();
   areaFilter.oninput    = () => render();
 
-  // Tabs
-  const tabs = document.querySelectorAll('.tab-btn');
-  tabs.forEach(btn => btn.addEventListener('click', () => {
-    tabs.forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
-  }));
-
-  // Nurse identity
   document.getElementById('saveNurse').onclick = () => {
     const v = nurseInput.value.trim();
     if (!v) return;
@@ -102,13 +23,11 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // State
   let beds = [];
   let reserveMinutes = RESERVE_MINUTES_FALLBACK;
   let tickTimer = null;
-  let justWroteUntil = 0;   // during this window we refuse to redraw from CSV
+  let justWroteUntil = 0; // during this window we refuse to draw from CSV
 
-  // Helpers
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
@@ -126,7 +45,7 @@
   }
 
   async function loadBeds(){
-    // Try API with retry
+    // Try API (with retry)
     try {
       const json = await fetchJsonWithRetry(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, 3, 600);
       if (!json || !json.ok || !Array.isArray(json.beds)) throw new Error("Bad JSON payload");
@@ -141,8 +60,11 @@
       console.warn("API failed:", e);
     }
 
-    // If we just wrote, don't fall back to CSV yet (avoid wiping optimistic state)
-    if (Date.now() < justWroteUntil) return;
+    // If we just wrote, DO NOT fall back to CSV yet (avoid wiping optimistic state)
+    if (Date.now() < justWroteUntil) {
+      // keep current view; try again shortly
+      return;
+    }
 
     // CSV fallback
     try {
@@ -218,7 +140,7 @@
   }
 
   function actionsForRow(row){
-    // Only show Reserve when Available; otherwise blank
+    // Only show Reserve when Available; otherwise blank (no "Mark Available")
     if ((row.status||"").toLowerCase()==="available") {
       return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Reserve 30m</button>`;
     }
@@ -247,8 +169,7 @@
           <td>${escapeHtml(r.nurse||"")}</td>
           <td>${fmtTime(r.timeBooked||"")}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
-        </tr>
-      `),
+        </tr>`),
       "</tbody></table>"
     ].join("");
   }
@@ -278,6 +199,7 @@
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(payload)
     });
+    // be defensive
     const text = await res.text();
     try { return JSON.parse(text); } catch { return { ok:false, raw:text }; }
   }
@@ -292,11 +214,11 @@
     if (!nurse) { alert("Enter your Nurse name/email and click Save first."); return; }
     const nowIso = new Date().toISOString();
 
-    // optimistic UI
+    // optimistic UI — this keeps it visible even if JSON briefly fails
     optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: nowIso });
 
-    // set a short cooldown so we don't immediately redraw from stale CSV
-    justWroteUntil = Date.now() + 15000;
+    // set a cooldown where we do NOT redraw from CSV
+    justWroteUntil = Date.now() + 15000; // 15s is usually enough for Apps Script + CSV cache
 
     try {
       await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
@@ -307,8 +229,6 @@
     }
   };
 
-  // First load
+  // first load
   loadBeds();
 </script>
-</body>
-</html>
