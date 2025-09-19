@@ -15,16 +15,16 @@
     .tab-btn.active { background:#111; color:#fff; border-color:#111; }
     .panel { display:none; }
     .panel.active { display:block; }
+
     table { border-collapse:collapse; width:100%; margin-top:8px; }
-    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; vertical-align:top; }
+    th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
     th { background:#fafafa; }
+
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; }
+    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
     .muted { color:#666; font-size:12px; }
-    .badge { font-size:12px; padding:4px 8px; border:1px solid #ddd; border-radius:999px; }
-    .sub { display:block; font-size:11px; color:#555; margin-top:2px; }
   </style>
 </head>
 <body>
@@ -35,7 +35,6 @@
     <input id="nurse" type="text" placeholder="e.g. may@example.com" />
     <button id="saveNurse">Save</button>
     <span class="muted" id="nurseSavedNote"></span>
-    <span id="diag" class="badge muted"></span>
   </div>
 
   <div class="tabs">
@@ -67,31 +66,12 @@
   </div>
 
 <script>
-  // Endpoints
+  // === CONFIG ===
   const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzBmAYNv4eTLAwAZFj-MvGHJsplP2Ugen8e6hzypnIUhLE4nKBxvIhY5M9RlrBqxbX4aw/exec";
-  const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTqIG5jdlPsNsD8r-IP3XccHrLkszIxFVSMsGBornwBZ8kjK75aVncpCMew4YkD846KtMflV39-Aoff/pub?gid=0&single=true&output=csv";
-  const RESERVE_MINUTES_FALLBACK = 30;
-
-  // UI refs
-  const nurseInput = document.getElementById('nurse');
-  const nurseNote  = document.getElementById('nurseSavedNote');
-  const diag       = document.getElementById('diag');
-  const statusFilter = document.getElementById('statusFilter');
-  const areaFilter   = document.getElementById('areaFilter');
-  document.getElementById('refreshBtn').onclick = () => loadBeds();
-  statusFilter.onchange = () => render();
-  areaFilter.oninput    = () => render();
-
-  // Tabs
-  const tabs = document.querySelectorAll('.tab-btn');
-  tabs.forEach(btn => btn.addEventListener('click', () => {
-    tabs.forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.getElementById(btn.dataset.tab).classList.add('active');
-  }));
 
   // Nurse identity
+  const nurseInput = document.getElementById('nurse');
+  const nurseNote  = document.getElementById('nurseSavedNote');
   document.getElementById('saveNurse').onclick = () => {
     const v = nurseInput.value.trim();
     if (!v) return;
@@ -102,165 +82,88 @@
   const saved = localStorage.getItem('bmu_nurse') || "";
   if (saved) { nurseInput.value = saved; nurseNote.textContent = `Saved as ${saved}`; }
 
-  // State
+  // Tabs
+  const tabs = document.querySelectorAll('.tab-btn');
+  tabs.forEach(btn => btn.addEventListener('click', () => {
+    tabs.forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(btn.dataset.tab).classList.add('active');
+  }));
+
+  // Filters
+  const statusFilter = document.getElementById('statusFilter');
+  const areaFilter   = document.getElementById('areaFilter');
+  document.getElementById('refreshBtn').onclick = () => loadBeds();
+  statusFilter.onchange = () => render();
+  areaFilter.oninput    = () => render();
+
+  // Data
   let beds = [];
-  let reserveMinutes = RESERVE_MINUTES_FALLBACK;
-  let tickTimer = null;
-  let justWroteUntil = 0;   // during this window we refuse to redraw from CSV
-
-  // Helpers
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
-
-  async function fetchJsonWithRetry(url, tries=3, delayMs=600){
-    let lastErr;
-    for (let i=0;i<tries;i++){
-      try{
-        const res = await fetch(url, { cache:'no-store' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return await res.json();
-      }catch(e){ lastErr = e; await sleep(delayMs); }
-    }
-    throw lastErr || new Error('fetch failed');
-  }
 
   async function loadBeds(){
-    // Try API with retry
     try {
-      const json = await fetchJsonWithRetry(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, 3, 600);
-      if (!json || !json.ok || !Array.isArray(json.beds)) throw new Error("Bad JSON payload");
-      beds = json.beds;
-      reserveMinutes = json.reserveMinutes || RESERVE_MINUTES_FALLBACK;
-      diag.textContent = `API ok (${beds.length} rows)`;
+      const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
+      const json = await res.json();
+      beds = (json && json.ok) ? json.beds : [];
       render();
-      restartTicker();
-      return;
     } catch (e) {
-      diag.textContent = `API error: ${e.message || e}`;
-      console.warn("API failed:", e);
+      console.error("API fetch failed", e);
     }
-
-    // If we just wrote, don't fall back to CSV yet (avoid wiping optimistic state)
-    if (Date.now() < justWroteUntil) return;
-
-    // CSV fallback
-    try {
-      const res = await fetch(`${CSV_URL}${CSV_URL.includes('?') ? '&' : '?'}_=${Date.now()}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-      const rows = text.replace(/\r/g,'').split("\n").filter(Boolean).map(splitCsvRow);
-      if (rows.length < 2) { beds = []; diag.textContent = "CSV ok (0 rows)"; render(); return; }
-      const h = rows[0];
-      const idx = {
-        bedID: h.indexOf("Bed ID"), area: h.indexOf("Area"), status: h.indexOf("Status"),
-        nurse: h.indexOf("Nurse"), timeBooked: h.indexOf("Time Booked"), lastUpdated: h.indexOf("Last Updated")
-      };
-      beds = rows.slice(1).map(r => ({
-        bedID: r[idx.bedID] || "", area: r[idx.area] || "", status: r[idx.status] || "",
-        nurse: r[idx.nurse] || "", timeBooked: r[idx.timeBooked] || "", lastUpdated: r[idx.lastUpdated] || ""
-      }));
-      diag.textContent = `CSV ok (${beds.length} rows)`;
-      render();
-      restartTicker();
-    } catch (e) {
-      diag.textContent = `CSV error: ${e.message || e}`;
-      console.error("CSV load error:", e);
-    }
-  }
-
-  function splitCsvRow(row) {
-    const out = []; let cur = '', inQ = false;
-    for (let i = 0; i < row.length; i++) {
-      const c = row[i];
-      if (c === '"') { if (inQ && row[i+1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
-      else if (c === ',' && !inQ) { out.push(cur); cur = ''; }
-      else cur += c;
-    }
-    out.push(cur);
-    return out.map(s => s.trim());
   }
 
   function pill(status){
     const s = (status||"").toLowerCase();
     if (s==="available")   return `<span class="pill pill-available">Available</span>`;
     if (s==="reserved")    return `<span class="pill pill-reserved">Reserved</span>`;
-    if (s==="unavailable" || s==="booked") return `<span class="pill pill-unavailable">Unavailable</span>`;
+    if (s==="unavailable") return `<span class="pill pill-unavailable">Unavailable</span>`;
     return status || "";
   }
 
-  function fmtTime(iso){
-    if (!iso) return "";
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, { year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
-  }
-
-  function expiryFromRow(row){
-    if ((row.status||"").toLowerCase()!=="reserved" || !row.timeBooked) return "";
-    const start = Date.parse(row.timeBooked);
-    if (isNaN(start)) return "";
-    return new Date(start + (reserveMinutes*60000)).toISOString();
-  }
-  function countdownText(expiryIso){
-    if (!expiryIso) return "";
-    const end = Date.parse(expiryIso), now = Date.now(), ms = end - now;
-    if (isNaN(end) || ms <= 0) return "expiring…";
-    const s = Math.floor(ms/1000), m = Math.floor(s/60), r = s%60;
-    return `${m}m ${r}s left`;
-  }
-  function restartTicker(){
-    if (tickTimer) clearInterval(tickTimer);
-    tickTimer = setInterval(() => {
-      document.querySelectorAll('[data-expiry]').forEach(el => {
-        el.textContent = countdownText(el.getAttribute('data-expiry'));
-      });
-    }, 1000);
-  }
-
   function actionsForRow(row){
-    // Only show Reserve when Available; otherwise blank
-    if ((row.status||"").toLowerCase()==="available") {
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area||"")}')">Reserve 30m</button>`;
+    const s = (row.status||"").toLowerCase();
+    if (s==="available") {
+      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
+    }
+    if (s==="reserved") {
+      return `<span class="muted">Reserved</span>`;
+    }
+    if (s==="unavailable") {
+      return ""; // No action for unavailable
     }
     return "";
-  }
-
-  function rowStatusCell(row){
-    const p = pill(row.status||"");
-    const exp = expiryFromRow(row);
-    if (exp) return `${p}<span class="sub" data-expiry="${escapeAttr(exp)}">${countdownText(exp)}</span>`;
-    return p;
   }
 
   function mountTable(targetId, rows){
     const el = document.getElementById(targetId);
     if (!rows.length) { el.innerHTML = "<div class='muted'>No rows</div>"; return; }
-    el.innerHTML = [
+    const html = [
       "<table>",
       "<thead><tr><th>Bed ID</th><th>Area</th><th>Status</th><th>Nurse</th><th>Time</th><th style='width:1%'>Action</th></tr></thead>",
       "<tbody>",
       ...rows.map(r=>`
         <tr>
-          <td>${escapeHtml(String(r.bedID))}</td>
-          <td>${escapeHtml(r.area||"")}</td>
-          <td>${rowStatusCell(r)}</td>
-          <td>${escapeHtml(r.nurse||"")}</td>
-          <td>${fmtTime(r.timeBooked||"")}</td>
+          <td>${escapeHtml(r.bedID)}</td>
+          <td>${escapeHtml(r.area)}</td>
+          <td>${pill(r.status)}</td>
+          <td>${escapeHtml(r.nurse)}</td>
+          <td>${escapeHtml(r.timeBooked)}</td>
           <td style="white-space:nowrap">${actionsForRow(r)}</td>
         </tr>
       `),
       "</tbody></table>"
     ].join("");
+    el.innerHTML = html;
   }
 
   function render(){
     const areaQ = (areaFilter.value||"").toLowerCase();
-    const statusQ = (statusFilter.value||"").toLowerCase();
+    const statusQ = statusFilter.value;
     const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
     const filtered = beds.filter(b =>
-      (areaQ==="" || String(b.area||"").toLowerCase().includes(areaQ)) &&
-      (statusQ==="" || String(b.status||"").toLowerCase() === statusQ)
+      (areaQ==="" || (b.area||"").toLowerCase().includes(areaQ)) &&
+      (statusQ==="" || (b.status||"") === statusQ)
     );
     mountTable("tblOverall", filtered);
 
@@ -278,37 +181,22 @@
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(payload)
     });
-    const text = await res.text();
-    try { return JSON.parse(text); } catch { return { ok:false, raw:text }; }
-  }
-
-  function optimisticUpdate(bedID, patch) {
-    const idx = beds.findIndex(b => String(b.bedID) === String(bedID));
-    if (idx >= 0) { beds[idx] = { ...beds[idx], ...patch }; render(); }
+    return res.json();
   }
 
   window.reserveBed = async (bedID, area) => {
     const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
-    if (!nurse) { alert("Enter your Nurse name/email and click Save first."); return; }
+    if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
     const nowIso = new Date().toISOString();
-
-    // optimistic UI
-    optimisticUpdate(bedID, { status: "Reserved", nurse, timeBooked: nowIso });
-
-    // set a short cooldown so we don't immediately redraw from stale CSV
-    justWroteUntil = Date.now() + 15000;
-
-    try {
-      await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
-    } finally {
-      // two gentle retries to refresh from JSON
-      await sleep(600); await loadBeds();
-      await sleep(800); await loadBeds();
-    }
+    await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
+    await loadBeds();
   };
 
-  // First load
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
+
   loadBeds();
+  setInterval(loadBeds, 15000);
 </script>
 </body>
 </html>
