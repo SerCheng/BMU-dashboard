@@ -5,7 +5,7 @@
   <title>BMU Dashboard</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { font-family: system-ui, sans-serif; margin:16px; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin:16px; }
     .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
     input[type="text"], select { padding:6px 10px; border:1px solid #ddd; border-radius:8px; }
     button { padding:6px 10px; border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer; }
@@ -15,13 +15,15 @@
     .tab-btn.active { background:#111; color:#fff; border-color:#111; }
     .panel { display:none; }
     .panel.active { display:block; }
+
     table { border-collapse:collapse; width:100%; margin-top:8px; }
     th, td { border:1px solid #e5e5e5; padding:8px; text-align:left; }
     th { background:#fafafa; }
+
     .pill { padding:2px 8px; border-radius:10px; font-size:12px; }
     .pill-available   { background:#e8f7e8; border:1px solid #a6d9a6; color:#0e6026; }
     .pill-reserved    { background:#fff7e6; border:1px solid #f6d28a; color:#8a4b00; }
-    .pill-unavailable { background:#ffe9e9; border:1px solid #f5bcbc; color:#9b111e; }
+    .pill-unavailable { background:#ffe0e0; border:1px solid #ef9a9a; color:#9b111e; }
     .muted { color:#666; font-size:12px; }
   </style>
 </head>
@@ -29,7 +31,7 @@
   <h1>BMU Dashboard</h1>
 
   <div class="row">
-    <label for="nurse">Nurse:</label>
+    <label for="nurse">Nurse (name or email):</label>
     <input id="nurse" type="text" placeholder="e.g. may@example.com" />
     <button id="saveNurse">Save</button>
     <span class="muted" id="nurseSavedNote"></span>
@@ -59,12 +61,12 @@
   </div>
 
   <div id="myreserved" class="panel">
-    <div class="row"><span class="muted">Beds reserved by you.</span></div>
+    <div class="row"><span class="muted">Showing beds reserved or unavailable by you.</span></div>
     <div id="tblMyReserved"></div>
   </div>
 
 <script>
-  // --- Your live Apps Script web app URL ---
+  // === CONFIG ===
   const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzBmAYNv4eTLAwAZFj-MvGHJsplP2Ugen8e6hzypnIUhLE4nKBxvIhY5M9RlrBqxbX4aw/exec";
 
   // Nurse identity
@@ -98,9 +100,7 @@
 
   // Data
   let beds = [];
-  let pending = {}; // local overlay: { "Area||BedID": {status,nurse,until} }
 
-  // Read from Apps Script as JSON
   async function loadBeds(){
     try {
       const res = await fetch(`${WEB_APP_URL}?fn=beds&_=${Date.now()}`, { cache: 'no-store' });
@@ -112,7 +112,6 @@
     }
   }
 
-  // Render helpers
   function pill(status){
     const s = (status||"").toLowerCase();
     if (s==="available")   return `<span class="pill pill-available">Available</span>`;
@@ -124,9 +123,14 @@
   function actionsForRow(row){
     const s = (row.status||"").toLowerCase();
     if (s==="available") {
-      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}','${escapeAttr(row.area)}')">Reserve 30m</button>`;
+      return `<button onclick="reserveBed('${escapeAttr(row.bedID)}', '${escapeAttr(row.area)}')">Reserve 30m</button>`;
     }
-    // if unavailable/reserved, no action (blank)
+    if (s==="reserved") {
+      return `<span class="muted">Reserved</span>`;
+    }
+    if (s==="unavailable") {
+      return ""; // No action for unavailable
+    }
     return "";
   }
 
@@ -144,7 +148,7 @@
           <td>${pill(r.status)}</td>
           <td>${escapeHtml(r.nurse)}</td>
           <td>${escapeHtml(r.timeBooked)}</td>
-          <td>${actionsForRow(r)}</td>
+          <td style="white-space:nowrap">${actionsForRow(r)}</td>
         </tr>
       `),
       "</tbody></table>"
@@ -157,31 +161,20 @@
     const statusQ = statusFilter.value;
     const me = (localStorage.getItem('bmu_nurse')||"").trim().toLowerCase();
 
-    // Overlay pending reservations
-    const merged = beds.map(b=>{
-      const key = (b.area||"")+"||"+(b.bedID||"");
-      const p = pending[key];
-      if (p && Date.now() < p.until) {
-        return { ...b, status: p.status, nurse: p.nurse, timeBooked: new Date().toLocaleString() };
-      }
-      return b;
-    });
-
-    const filtered = merged.filter(b =>
+    const filtered = beds.filter(b =>
       (areaQ==="" || (b.area||"").toLowerCase().includes(areaQ)) &&
       (statusQ==="" || (b.status||"") === statusQ)
     );
     mountTable("tblOverall", filtered);
 
-    const mine = merged.filter(b => {
+    const mine = beds.filter(b => {
       const nurse = (b.nurse||"").toLowerCase();
       const s = (b.status||"").toLowerCase();
-      return me && nurse===me && (s==="reserved");
+      return me && nurse===me && (s==="reserved" || s==="unavailable");
     });
     mountTable("tblMyReserved", mine);
   }
 
-  // Write via Apps Script
   async function callApi(payload){
     const res = await fetch(WEB_APP_URL, {
       method: "POST",
@@ -194,19 +187,14 @@
   window.reserveBed = async (bedID, area) => {
     const nurse = (localStorage.getItem('bmu_nurse')||"").trim();
     if (!nurse) { alert("Enter your nurse name/email and click Save."); return; }
-    // optimistic overlay for 30m
-    const key = area+"||"+bedID;
-    pending[key] = { status:"Reserved", nurse, until: Date.now()+30*60*1000 };
-    render();
-    await callApi({ bedID, area, status:"reserved", nurseName:nurse, clientTime:new Date().toISOString() });
+    const nowIso = new Date().toISOString();
+    await callApi({ bedID, area, status: "reserved", nurseName: nurse, clientTime: nowIso });
     await loadBeds();
   };
 
-  // Helpers
   function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function escapeAttr(s){ return escapeHtml(s).replace(/"/g,'&quot;'); }
 
-  // Init
   loadBeds();
   setInterval(loadBeds, 15000);
 </script>
